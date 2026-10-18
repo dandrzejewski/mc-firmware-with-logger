@@ -1,0 +1,134 @@
+name: Build Repeater Firmware (packet logging)
+
+# Mirrors an upstream MeshCore repeater release (meshcore-dev/MeshCore tag
+# repeater-vX.Y.Z) for the boards in PIO_ENVS, built unmodified except for the
+# build-time flag -D MESH_PACKET_LOGGING=1 (for meshcoretomqtt).
+# The release here uses the same tag name as upstream.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Upstream repeater version to mirror, e.g. v1.18.0 (builds tag repeater-v1.18.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: meshcore-dev/MeshCore
+  # Upstream PlatformIO env names, space-separated. All are built in one job
+  # and published together, so a failure on any board publishes nothing.
+  PIO_ENVS: >-
+    RAK_3401_repeater
+    RAK_4631_repeater
+    heltec_v4_repeater
+    heltec_tracker_v2_repeater
+    Heltec_t096_repeater
+    Heltec_t114_repeater
+    WioTrackerL1_repeater
+    WioTrackerL1-1W_repeater
+  EXTRA_BUILD_FLAGS: "-D MESH_PACKET_LOGGING=1"
+  FILE_SUFFIX: "-logging"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$INPUT_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must look like v1.18.0 (got '$INPUT_VERSION')"
+            exit 1
+          fi
+          echo "version=${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=repeater-${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out upstream release tag
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: refs/tags/${{ steps.version.outputs.tag }}
+          # Upstream build.sh, its composite action and PlatformIO package
+          # scripts run in this checkout; keep this repo's write token out of
+          # .git/config so none of them can read it.
+          persist-credentials: false
+
+      - name: Set up build environment
+        uses: ./.github/actions/setup-build-environment
+
+      - name: Record upstream commit
+        id: commit
+        run: |
+          echo "short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "full_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # build.sh wipes out/ on every invocation, so all envs must be passed
+      # to a single call.
+      - name: Build firmware
+        env:
+          FIRMWARE_VERSION: ${{ steps.version.outputs.version }}
+          PLATFORMIO_BUILD_FLAGS: ${{ env.EXTRA_BUILD_FLAGS }}
+        run: |
+          read -ra envs <<< "$PIO_ENVS"
+          /usr/bin/env bash build.sh build-firmware "${envs[@]}"
+
+      # build.sh copies outputs with "|| true", so confirm every env produced
+      # its fresh-install image (nRF52 .uf2 or ESP32 -merged.bin) rather than
+      # publishing a release missing a board.
+      - name: Verify every board produced output
+        run: |
+          missing=0
+          for env in $PIO_ENVS; do
+            if ! compgen -G "out/${env}-*.uf2" > /dev/null \
+              && ! compgen -G "out/${env}-*-merged.bin" > /dev/null; then
+              echo "::error::no .uf2 or -merged.bin output for ${env}"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Add suffix to output files
+        run: |
+          cd out
+          for f in *; do
+            mv -- "$f" "${f%.*}${FILE_SUFFIX}.${f##*.}"
+          done
+          ls -l
+
+      - name: Write release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          FULL_SHA: ${{ steps.commit.outputs.full_sha }}
+          SHORT_SHA: ${{ steps.commit.outputs.short_sha }}
+        run: |
+          {
+            echo "Mirror of upstream \`${UPSTREAM_REPO}\` release \`${TAG}\`."
+            echo
+            echo "- Upstream release: https://github.com/${UPSTREAM_REPO}/releases/tag/${TAG}"
+            echo "- Upstream commit: \`${FULL_SHA}\`"
+            echo "- Device version string: \`${VERSION}-${SHORT_SHA}\`"
+            echo "- Only change from stock: \`${EXTRA_BUILD_FLAGS}\`"
+            echo
+            echo "Boards (upstream PlatformIO envs):"
+            echo
+            for env in $PIO_ENVS; do
+              echo "- \`${env}\`"
+            done
+          } > "$RUNNER_TEMP/release-notes.md"
+          cat "$RUNNER_TEMP/release-notes.md"
+
+      - name: Publish release
+        # Third-party action with contents: write; pinned to a commit SHA.
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: "Repeater Firmware ${{ steps.version.outputs.version }} (packet logging)"
+          body_path: ${{ runner.temp }}/release-notes.md
+          files: out/*
