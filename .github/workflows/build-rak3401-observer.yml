@@ -1,0 +1,75 @@
+name: Build RAK3401 Observer Repeater
+
+# Builds unmodified upstream MeshCore (meshcore-dev/MeshCore) at a chosen ref
+# for the RAK3401 1W repeater, with packet logging enabled for meshcoretomqtt.
+# The only change from stock is the build-time flag -D MESH_PACKET_LOGGING=1.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Upstream ref to build (tag, branch, or commit), e.g. repeater-v1.14.1 or main"
+        required: true
+        default: "main"
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: meshcore-dev/MeshCore
+  PIO_ENV: RAK_3401_repeater
+  EXTRA_BUILD_FLAGS: "-D MESH_PACKET_LOGGING=1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out upstream MeshCore
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ inputs.ref }}
+
+      - name: Set up build environment
+        uses: ./.github/actions/setup-build-environment
+
+      - name: Determine version
+        id: version
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          # "repeater-v1.14.1" -> "v1.14.1"; anything else -> sanitized ref
+          if [[ "$INPUT_REF" =~ -(v[0-9][0-9A-Za-z.\-]*)$ ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+          else
+            VERSION=$(echo "$INPUT_REF" | tr '/' '-' | tr -cd 'A-Za-z0-9._-')
+          fi
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "full_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tag=rak3401-observer-${VERSION}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build firmware
+        env:
+          FIRMWARE_VERSION: ${{ steps.version.outputs.version }}
+          PLATFORMIO_BUILD_FLAGS: ${{ env.EXTRA_BUILD_FLAGS }}
+        run: /usr/bin/env bash build.sh build-firmware "$PIO_ENV"
+
+      - name: List build output
+        run: ls -l out
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: "RAK3401 Observer Repeater ${{ steps.version.outputs.version }} (${{ steps.version.outputs.short_sha }})"
+          body: |
+            Unmodified upstream `${{ env.UPSTREAM_REPO }}` built for `${{ env.PIO_ENV }}`.
+
+            - Upstream ref: `${{ inputs.ref }}`
+            - Upstream commit: `${{ steps.version.outputs.full_sha }}`
+            - Extra build flags: `${{ env.EXTRA_BUILD_FLAGS }}`
+          files: out/*
