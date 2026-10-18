@@ -16,6 +16,12 @@ on:
 permissions:
   contents: write
 
+# Runs for the same version publish to the same release tag; queue them
+# instead of letting them race. Different versions still run in parallel.
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version }}
+  cancel-in-progress: false
+
 env:
   UPSTREAM_REPO: meshcore-dev/MeshCore
   # Upstream PlatformIO env names, space-separated. All are built in one job
